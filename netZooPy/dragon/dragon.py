@@ -497,6 +497,48 @@ def estimate_p_values_mc(r, n, p1, p2, lambdas, seed = 1, verbose = True):
 
     return(mc_p)
 
+def empirical_p_vals(list_a, list_b): # list_a is the null distribution, list_b is the observed 
+    # assert both lists are sorted
+
+    pvals = np.empty(len(list_b))
+    print(pvals)
+    a = 0
+    b = 0
+    while b < len(list_b):
+        while a < len(list_a) and list_a[a] <= list_b[b]:
+            a+=1
+        pvals[b] = 1-a/len(list_a)
+        b+=1
+    return pvals
+
+def flatten_and_sort(M): # M is a symmetric matrix
+    # check for symmetry
+    if not sp.linalg.issymmetric(M):
+        print("[flatten_and_sort] Input matrix must be symmetric")
+        end()
+     
+    # use numpy meshgrid to convert the symmetric matrix to an edgelist array
+    # ref: https://stackoverflow.com/questions/31081067/flatten-numpy-array-but-also-keep-index-of-value-positions
+    col_idx, row_idx = np.meshgrid(np.arange(M.shape[0]),np.arange(M.shape[1]))
+    table = np.vstack((row_idx.ravel(), col_idx.ravel(), M.ravel())).T
+    df = pd.DataFrame(table, columns = ["row_idx","col_idx","value"])
+       
+    # filter the edgelist for i < j to get only the upper triangle and not the diagonal
+    # and sort the edgelist
+    utri_df = df[df["row_idx"] < df["col_idx"]].sort_values(by="value")    
+    return(utri_df)
+
+def estimate_p_values_mc_fast(r, n, p1, p2, lambdas, seed = 1, verbose = True):
+    lam = lambdas
+    r_null = MC_estimate(n, p1, p2,lam, seed) 
+    
+    IDs = np.cumsum([0,p1,p2])
+    r_null_11 = r_null_abs[IDs[0]:IDs[1],IDs[0]:IDs[1]][np.triu_indices(p1,k=1)]
+    r_null_12 = r_null_abs[IDs[0]:IDs[1],IDs[1]:IDs[2]].flatten()
+    r_null_22 = r_null_abs[IDs[1]:IDs[2],IDs[1]:IDs[2]][np.triu_indices(p2,k=1)]
+
+    # for each quadrant, run flatten_and_sort, then empirical_p_vals, then back together
+
 def calculate_true_R(X1, X2, Sigma):
     x = np.arange(0., 1.01, 0.01)
     n_lams = len(x)
