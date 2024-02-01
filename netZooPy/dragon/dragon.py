@@ -1,5 +1,7 @@
-import numpy as np
 import math
+import networkx as nx
+import numpy as np
+import pandas as pd
 from pylab import meshgrid
 from scipy.optimize import minimize
 from scipy import optimize
@@ -437,9 +439,9 @@ def estimate_p_values_mc(r, n, p1, p2, lambdas, seed = 1, verbose = True):
 
     # split r_null from MC_estimate into r11, r12/r21, and r22 to assign p-values
     IDs = np.cumsum([0,p1,p2])
-    r_null_11 = r_null_abs[IDs[0]:IDs[1],IDs[0]:IDs[1]][np.triu_indices(p1,k=1)]
-    r_null_12 = r_null_abs[IDs[0]:IDs[1],IDs[1]:IDs[2]].flatten()
-    r_null_22 = r_null_abs[IDs[1]:IDs[2],IDs[1]:IDs[2]][np.triu_indices(p2,k=1)]
+    r_null_11 = sorted(r_null_abs[IDs[0]:IDs[1],IDs[0]:IDs[1]][np.triu_indices(p1,k=1)])
+    r_null_12 = sorted(r_null_abs[IDs[0]:IDs[1],IDs[1]:IDs[2]].flatten())
+    r_null_22 = sorted(r_null_abs[IDs[1]:IDs[2],IDs[1]:IDs[2]][np.triu_indices(p2,k=1)])
     
     # assign p-values
     mc_p_11 = np.zeros(shape=[p1,p1])
@@ -501,7 +503,6 @@ def empirical_p_vals(list_a, list_b): # list_a is the null distribution, list_b 
     # assert both lists are sorted
 
     pvals = np.empty(len(list_b))
-    print(pvals)
     a = 0
     b = 0
     while b < len(list_b):
@@ -511,34 +512,77 @@ def empirical_p_vals(list_a, list_b): # list_a is the null distribution, list_b 
         b+=1
     return pvals
 
-def flatten_and_sort(M): # M is a symmetric matrix
-    # check for symmetry
-    if not sp.linalg.issymmetric(M):
-        print("[flatten_and_sort] Input matrix must be symmetric")
-        end()
-     
-    # use numpy meshgrid to convert the symmetric matrix to an edgelist array
-    # ref: https://stackoverflow.com/questions/31081067/flatten-numpy-array-but-also-keep-index-of-value-positions
-    col_idx, row_idx = np.meshgrid(np.arange(M.shape[0]),np.arange(M.shape[1]))
-    table = np.vstack((row_idx.ravel(), col_idx.ravel(), M.ravel())).T
-    df = pd.DataFrame(table, columns = ["row_idx","col_idx","value"])
-       
-    # filter the edgelist for i < j to get only the upper triangle and not the diagonal
-    # and sort the edgelist
-    utri_df = df[df["row_idx"] < df["col_idx"]].sort_values(by="value")    
-    return(utri_df)
-
 def estimate_p_values_mc_fast(r, n, p1, p2, lambdas, seed = 1, verbose = True):
     lam = lambdas
     r_null = MC_estimate(n, p1, p2,lam, seed) 
+    r_null_abs = np.abs(r_null)
     
     IDs = np.cumsum([0,p1,p2])
-    r_null_11 = r_null_abs[IDs[0]:IDs[1],IDs[0]:IDs[1]][np.triu_indices(p1,k=1)]
-    r_null_12 = r_null_abs[IDs[0]:IDs[1],IDs[1]:IDs[2]].flatten()
-    r_null_22 = r_null_abs[IDs[1]:IDs[2],IDs[1]:IDs[2]][np.triu_indices(p2,k=1)]
+    r_null_11 = sorted(r_null_abs[IDs[0]:IDs[1],IDs[0]:IDs[1]][np.triu_indices(p1,k=1)])
+    r_null_12 = sorted(r_null_abs[IDs[0]:IDs[1],IDs[1]:IDs[2]].flatten())
+    r_null_22 = sorted(r_null_abs[IDs[1]:IDs[2],IDs[1]:IDs[2]][np.triu_indices(p2,k=1)])
 
-    # for each quadrant, run flatten_and_sort, then empirical_p_vals, then back together
-
+    # use networkx to create an edgelist in pandas DataFrame form 
+    # for each region of the original input partial correlation
+    G_11 = nx.from_numpy_array(np.abs(r[IDs[0]:IDs[1],IDs[0]:IDs[1]]))
+    # zero out the 11 and 22 blocks to create G_12
+    r_12 = np.copy(r)
+    r_12[IDs[0]:IDs[1],IDs[0]:IDs[1]] = 0
+    r_12[IDs[1]:IDs[2],IDs[1]:IDs[2]] = 0
+    G_12 = nx.from_numpy_array(np.abs(r_12))
+    G_22 = nx.from_numpy_array(np.abs(r[IDs[1]:IDs[2],IDs[1]:IDs[2]]))
+    edge_df_11 = nx.to_pandas_edgelist(G_11).sort_values(by="weight")
+    edge_df_12 = nx.to_pandas_edgelist(G_12).sort_values(by="weight")
+    edge_df_22 = nx.to_pandas_edgelist(G_22).sort_values(by="weight")
+    
+    # calculate empirical p-values for the edgelist
+    p_11 = empirical_p_vals(list_a = r_null_11,list_b = edge_df_11["weight"].tolist())
+    p_12 = empirical_p_vals(list_a = r_null_12,list_b = edge_df_12["weight"].tolist())
+    p_22 = empirical_p_vals(list_a = r_null_22,list_b = edge_df_22["weight"].tolist())
+    
+    # assign a column for the empirical p-values in the pandas df
+    edge_df_11["p"] = p_11
+    edge_df_12["p"] = p_12
+    edge_df_22["p"] = p_22
+    
+    # calculate adjusted p-values
+    edge_df_11["p_adj"]=multi.multipletests(edge_df_11["p"], alpha=0.05, method='fdr_bh')[1]
+    edge_df_12["p_adj"]=multi.multipletests(edge_df_12["p"], alpha=0.05, method='fdr_bh')[1]
+    edge_df_22["p_adj"]=multi.multipletests(edge_df_22["p"], alpha=0.05, method='fdr_bh')[1]
+    
+    # convert back to np arrays via networkx graphs
+    G_11_p = nx.from_pandas_edgelist(edge_df_11,
+                                source = "source",
+                                target = "target",
+                                edge_attr = ["weight","p","p_adj"])
+    G_12_p = nx.from_pandas_edgelist(edge_df_12,
+                                source = "source",
+                                target = "target",
+                                edge_attr = ["weight","p","p_adj"])
+    G_22_p = nx.from_pandas_edgelist(edge_df_22,
+                                source = "source",
+                                target = "target",
+                                edge_attr = ["weight","p","p_adj"])
+    
+    # convert graphs to numpy arrays for p-values 
+    # setting non-edges to Inf
+    p_11_out = nx.to_numpy_array(G_11_p,weight="p",nonedge=math.inf,nodelist=range(p1))
+    p_12_out = nx.to_numpy_array(G_12_p,weight="p", nodelist=range(p1+p2),nonedge=math.inf)
+    p_22_out = nx.to_numpy_array(G_22_p,weight="p",nonedge=math.inf,nodelist=range(p2))
+    all_p_out = np.copy(p_12_out)
+    all_p_out[IDs[0]:IDs[1],IDs[0]:IDs[1]] = p_11_out
+    all_p_out[IDs[1]:IDs[2],IDs[1]:IDs[2]] = p_22_out
+    
+    # same thing for adj p-values
+    adj_p_11_out = nx.to_numpy_array(G_11_p,weight="p_adj",nonedge=math.inf,nodelist=range(p1))
+    adj_p_12_out = nx.to_numpy_array(G_12_p,weight="p_adj", nodelist=range(p1+p2),nonedge=math.inf)
+    adj_p_22_out = nx.to_numpy_array(G_22_p,weight="p_adj",nonedge=math.inf,nodelist=range(p2))
+    all_adj_p_out = np.copy(adj_p_12_out)
+    all_adj_p_out[IDs[0]:IDs[1],IDs[0]:IDs[1]] = adj_p_11_out
+    all_adj_p_out[IDs[1]:IDs[2],IDs[1]:IDs[2]] = adj_p_22_out
+    
+    return(all_adj_p_out, all_p_out)     
+        
 def calculate_true_R(X1, X2, Sigma):
     x = np.arange(0., 1.01, 0.01)
     n_lams = len(x)
